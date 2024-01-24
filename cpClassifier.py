@@ -1,9 +1,7 @@
 import numpy
-import matplotlib.pyplot as plt
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.datasets import load_digits
-import matplotlib.colors as mcolors
 from scipy.optimize import minimize
 
 class transformScores:
@@ -199,14 +197,5 @@ std = numpy.std(results/results[-1], axis = 1)
 
 print('average (5 runs) relative size, f1, validity [ml, smoothSize] ', means[:-1])
 print('std deviation (5 runs) size, f1, validity [ml, smoothSize]', std[:-1])
-
-
-plt.errorbar([0, 1], means[:-1, 0], yerr=std[:-1, i], alpha=.5, label='PS average size')
-plt.errorbar([0, 1], means[:-1, 1], yerr=std[:-1, i], alpha=.5, label='PS f1')
-plt.plot([0, 1], [1, 1], 'k--', alpha=.5, label='unweighted CP')
-plt.xticks([0, 1], labels=['ml', 'size'])
-plt.legend()
-plt.title('relative size and f1 gains')
-plt.show()
 print(results)
 
