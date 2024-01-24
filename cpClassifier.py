@@ -1,5 +1,5 @@
 import numpy
-import matplotlib as plt
+import matplotlib.pyplot as plt
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.datasets import load_digits
