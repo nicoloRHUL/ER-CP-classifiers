@@ -5,38 +5,37 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.datasets import load_digits
 import matplotlib.colors as mcolors
 from scipy.optimize import minimize
+from wscClass import *
+
+
 
 class transformScores:
-    def __init__(self, classifier, model, X, y, obj, rho = 0):
+    def __init__(self, classifier, model, X, y, rho = 0):
+        if model[-1] == '+':
+            self.more = 1
+        else:
+            self.more = 0
         self.classifier = classifier
         self.n, self.K = self.classifier.predict_proba(X).shape
-        self.rho = rho 
-        self.name = obj
         self.rg = self.approximator(X, y)
         self.npars = 2 
+        if self.more: self.npars = 2 * (self.K + 1)
+        self.rho = rho# * self.npars
         self.model = model
-        if model == 'ER':
+        if model[:2] == 'ER':
             self.b = self.bER
-        if model == 'HR':
+        if model[:2] == 'HR':
             self.b = self.bHR
-        if model == 'temp':
+        if model[:4] == 'temp':
             self.b = self.bTemp
-        if model == 'off':
+        if model[:3] == 'off':
             self.b = self.bOff
         if model == 'unweighted':
             self.b = self.bBase
-            self.obj = None
             self.theta = numpy.zeros(self.npars) 
-            print(self.name,  ': done')
+            print(self.model,  ': done')
             print('status, nit, theta: ', None, None, self.theta)
-
-        
-        if obj == 'ML' and model != 'unweighted': 
-            self.obj = self.ML
-            self.theta = self.fitTransformation(X, y)
-        
-        if obj == 'size' and model != 'unweighted': 
-            self.obj = self.smoothSize
+        if model != 'unweighted': 
             self.theta = self.fitTransformation(X, y)
 
     def basicScore(self, p, eps = 1e-2):
@@ -58,9 +57,19 @@ class transformScores:
         G = numpy.array([self.rg[i].predict(x) for i in range(self.K)]).transpose()
         h = numpy.array([H(1 - G[i, :]).squeeze() for i in range(len(p))])
         return x, A, G, h
+    
+    def activation(self, t, eps = .01):
+        return t
+        #return numpy.log(1 + numpy.exp(t))#-1 + 2 * sigma(eps * t)
+
+    def extractPar(self, theta, Z):
+        d = int(len(theta)/2 - 1)
+        return [numpy.expand_dims(theta[(d + 1) * i] + self.activation(Z @ theta[1 + (d + 1) * i:(d + 1) * (i + 1)]), axis=-1) for i in [0, 1]]
    
     def bER(self, A, G, h, theta):
-        r = theta[0]**2 + theta[1]**2 * G
+        if self.more: xi = self.extractPar(theta, G)
+        else: xi = theta
+        r = xi[0]**2 + xi[1]**2 * G
         return A * numpy.exp(-r)
     
     def bBase(self, A, G, h, theta):
@@ -68,26 +77,32 @@ class transformScores:
     
     def bHR(self, A, G, h, theta):
         H = numpy.expand_dims(h, axis=1)
-        r = theta[0]**2 + theta[1]**2 * H
+        if self.more: xi = self.extractPar(theta, G)
+        else: xi = theta
+        r = xi[0]**2 + xi[1]**2 * H
         return A/(1e-4 + r)
     
     def bTemp(self, A, G, h, theta):
-        r1 = theta[0]**2 * A#1 - rescale(1 - A, theta[0]**2)
-        r2 = 1 - rescale(1 - G, theta[1]**2)
-        return r1 + r2
+        if self.more: xi = self.extractPar(theta, G)
+        else: xi = theta
+        r1 = 1 - rescale(1 - A, xi[0]**2)
+        r2 = xi[1]**2 * G
+        return (r1 + r2)#/sum([xi[i]**2 for i in range(len(xi))])
     
     def bOff(self, A, G, h, theta):
-        r1 = A + theta[1] * G
-        r2 = sum(theta**2)
+        if self.more: xi = self.extractPar(theta, G)
+        else: xi = theta
+        r1 = A + xi[1] * G
+        r2 = sum([xi[i]**2 for i in range(len(xi))])
         return r1/r2
 
     def fitTransformation(self, X, y):
         d1 = self.prepareData(self.classifier.predict_proba(X), X), y
-        initial_guess =  .3 * numpy.random.randn(self.npars)
-        optimal = minimize(self.obj, initial_guess,
-                args=(d1, d1),# method='CG', 
-                options={'maxiter': 100}, tol = 1e-4)
-        print(self.name, self.model,  ': done')
+        initial_guess =  .5 * numpy.random.randn(self.npars)
+        optimal = minimize(self.ML, initial_guess,
+            args=(d1, d1), options={'maxiter': 100}, tol = 1e-4)
+
+        print(self.model,  ': done')
         print('status, nit, theta: ', optimal.success, optimal.nit, optimal.x)
         return optimal.x
  
@@ -98,36 +113,11 @@ class transformScores:
         b1 = numpy.array([B1[i, y1[i]] for i in range(len(y1))])
         b1 = numpy.expand_dims(b1, axis = 1)
         B2 = self.b(A2, G2, h2, theta)
-        b2 = numpy.array([B2[i, y2[i]] for i in range(len(y1))])
+        b2 = numpy.array([B2[i, y2[i]] for i in range(len(y2))])
         b2 = numpy.expand_dims(b2, axis = 1)
         M = b1 - b2.transpose()
         m = numpy.linalg.norm(M - numpy.diag(numpy.diag(M))) 
         ell = m/len(y1)
-        return ell + self.rho * theta @ theta
-
-    def smoothSize(self, theta, d1, d2, scale = 1):
-        z1, y1 = d1
-        #[X2, A2, G2, h2]
-        z2, y2 = d2
-        half = int(len(y2)/2)
-        z1, y1 = [x[:half] for x in z1], y1[:half]
-        z2, y2 = [x[half:] for x in z2], y2[half:]
-        X1, A1, G1, h1 = z1
-        X2, A2, G2, h2 = z2
-        B2 = self.b(A2, G2, h2, theta)
-        b2 = numpy.array([B2[i2, y2[i2]] for i2 in range(len(y2))])
-        beta = 1
-        w = numpy.diag(rescale(
-            numpy.expand_dims(b2, axis=1).transpose(), 
-            beta).squeeze())
-        B1 = self.b(A1, G1, h1, theta)
-        B1 = numpy.expand_dims(B1, axis = 2)
-        B1 = numpy.transpose(B1, axes = [0, 2, 1])
-        b2 = numpy.array(b2)
-        b2 = numpy.expand_dims(b2, axis = [0, 2])
-        S = numpy.sum(sigma(- scale *(B1 - b2)/numpy.linalg.norm(B1)), 
-            axis = 2)
-        ell = 1/len(y1) * numpy.sum(S @ w)
         return ell + self.rho * theta @ theta
 
     def predict(self, x):
@@ -137,7 +127,6 @@ class transformScores:
     
     def evaluateCPclass(self, d1, d2, alpha = .1):
         X, y = d1
-        print(len(X))
         X, A, G, h = self.prepareData(self.classifier.predict_proba(X), X)
         B = self.b(A, G, h, self.theta)
         q = quantile([B[i, y[i]] for i in range(len(y))], alpha)
@@ -146,11 +135,20 @@ class transformScores:
         X, A, G, h = self.prepareData(self.classifier.predict_proba(X), X)
         B = self.b(A, G, h, self.theta)
         sets = [[m for m in range(self.K) if B[i][m] < q] for i in range(len(y))]
-        F1s, F1cps= F1score(sets, y)
+        F1s, valCond, sizeCond, f1Cond= F1score(sets, y)
         corrs = HScorr(1 - A, sets)
         sizes = numpy.sum([len(sets[i]) for i in range(len(sets))])/len(y)
         val = numpy.sum([1 for i in range(len(y)) if y[i] in sets[i]])/len(y)
-        return val, sizes, F1s, F1cps, corrs
+        print("wsc...")
+        wsc = wsc_unbiased_label(X, y, sets, 0,
+                delta=0.1, M=1000, test_size=0.75, 
+                random_state=2020, verbose=False)
+        print("wsc label...")
+        wsclabel = wsc_unbiased_label(X, y, sets, 1,
+                delta=0.1, M=1000, test_size=0.75, 
+                random_state=2020, verbose=False)
+        
+        return val, sizes, F1s, valCond, sizeCond, f1Cond, corrs, wsc, wsclabel
 
 def classifier(D):
     X, Y = D
@@ -185,8 +183,8 @@ def F1score(sets, y):
         TN = TN + sum([1 for j in negatives if j != y[i]])  
         FN = FN + sum([1 for j in negatives if j == y[i]]) 
     F1 = 2 * TP/(2 * TP + FP + FN)
-    F1cp = F1CPscore(sets, y)#F2 = (TP + TN)/(FP + FN)
-    return F1, F1cp
+    valCond, sizeCond, f1Cond = F1CPscore(sets, y)#F2 = (TP + TN)/(FP + FN)
+    return F1, min(valCond), max(sizeCond), min(f1Cond)
 
 def HScorr(F, sets):
     sizes = numpy.array([len(x) for x in sets])
@@ -195,18 +193,23 @@ def HScorr(F, sets):
 
 def F1CPscore(sets, y):
     mclasses = max(y) + 1
-    TP, FP, TN, FN = [[0 for m in range(mclasses)] for k in [0, 1, 2, 3]]
+    TP, FP, TN, FN, nsamples, csize = [[0 for m in range(mclasses)] for k in [0, 1, 2, 3, 4, 5]]
+
     for i in range(len(sets)):
         interval = sets[i]
         positives = [j for j in range(mclasses) if j in interval]
         negatives = [j for j in range(mclasses) if j not in interval]
         for m in range(mclasses):
-            TP[m] = TP[m] + 1 * (m in positives) * (y[i] == m)# in positives)
-            FP[m] = FP[m] + 1 * (m in positives) * (y[i] != m)# in negatives)
-            TN[m] = TN[m] + 1 * (m in negatives) * (y[i] !=m)# in negatives) 
-            FN[m] = FN[m] + 1 * (m in negatives) * (y[i] == m)# in positives) 
-    F1cp = numpy.prod([2 * TP[m]/(2 * TP[m] + FP[m] + FN[m]) for m in  range(mclasses)])
-    return F1cp
+            TP[m] = TP[m] + 1 * (m in positives) * (y[i] == m)
+            FP[m] = FP[m] + 1 * (m in positives) * (y[i] != m)
+            TN[m] = TN[m] + 1 * (m in negatives) * (y[i] !=m)
+            FN[m] = FN[m] + 1 * (m in negatives) * (y[i] == m)
+            nsamples[m] = nsamples[m] + 1 * (y[i] == m)
+            csize[m] = csize[m] + len(positives)* (y[i] == m)
+    f1Cond = [2 * TP[m]/(2 * TP[m] + FP[m] + FN[m]) for m in  range(mclasses)]
+    valCond = [TP[m]/nsamples[m] for m in range(mclasses)]
+    sizeCond = [csize[m]/nsamples[m] for m in range(mclasses)]
+    return valCond, sizeCond, f1Cond
 
 
 def splitData(X, y):
@@ -216,18 +219,18 @@ def splitData(X, y):
 
 
 #load and random-split the data
-numpy.random.seed(1234)
+numpy.random.seed(23456)
 digits = load_digits()
 Xall = digits.images
 yall = digits.target
 Xall = Xall.reshape([len(Xall), 64])
 
 #run experiments
-bNames = ['unweighted', 'ER', 'HR', 'temp', 'off']
-objs = ['ML', 'size']#['ML', 'size']#['size', 'ML', 'unweighted']
-rhos = [0.01, 0.01]#0.1, 0]#[0, .01, 0]
+#bNames = ['unweighted', 'ER', 'ER+', 'HR', 'HR+', 'temp', 'temp+', 'off', 'off+']
+bNames = ['unweighted', 'ER', 'HR', 'temp',  'off']
+rho = 0.001
 results = []
-for k in range(3):
+for k in range(2):
     alpha = .1
     choice = numpy.random.choice(len(Xall), size=len(Xall), replace=False)
     X, y = Xall[choice], yall[choice]
@@ -240,56 +243,40 @@ for k in range(3):
     dataset = train
     rfClass = classifier([dataset[0], dataset[1]])
     print(rfClass)
-    nSamples = 1000
-    X, y = [train[i][:nSamples] for i in [0, 1]]
+    X, y = train
     Xt, yt = test
     Xc, yc = cal
-    bModels = [[] for i in bNames]
-    for iobj in range(len(objs)):
-        obj = objs[iobj]
-        rho = rhos[iobj]
-        for ib in range(len(bNames)):
-            bModels[ib].append(
-                transformScores(rfClass, bNames[ib], X, y, obj, rho))
+    bModels = []
+    for ib in range(len(bNames)):
+        bModels.append(
+                transformScores(rfClass, bNames[ib], X, y, rho))
     
     r = [[] for i in bNames]
-    for iobjs in range(len(objs)):
-        for ib in range(len(bNames)): 
-            model = bModels[ib][iobjs]
-            score = model.evaluateCPclass(cal, test, alpha = .1)
-            val, size, f1, f1cp, corr = score
-            print(bNames[ib], objs[iobjs])
-            print(bModels[ib][iobjs].theta)
-            print('val, size, f1, f1cp, corr', score)
-            r[ib].append(score)
+    for ib in range(len(bNames)): 
+        model = bModels[ib]
+        score = model.evaluateCPclass(cal, test, alpha = .1)
+        val, sizes, F1s, valCond, sizeCond, f1Cond, corrs, wsc, wsclabel = score
+        print(bNames[ib])
+        print(bModels[ib].theta)
+        print("val, sizes, F1s, valCond, sizeCond, f1Cond, corrs, wsc, wsclabel", score)
+        r[ib].append(score)
 
     results.append(r)
 print(results)
-date='20240126'
+date='20240128'
 numpy.save('results'+date, results)
 results = numpy.load('results'+date+'.npy')
-nr = results/numpy.expand_dims(results[:, 0, :, :], axis=1)
+nr = results
 means=numpy.mean(nr, axis=0)
 stds=numpy.std(nr, axis=0)
 
-print('size')
-iScore = 1 
-for ib in range(1, len(bNames)):
-    print(bNames[ib])
-    print(means[ib,:, iScore])
 
-print('f1cp')
-iScore = 3 
-for ib in range(1, len(bNames)):
-    print(bNames[ib])
-    print(means[ib,:, iScore])
-
-print('corr')
-iScore = 4 
-for ib in range(1, len(bNames)):
-    print(bNames[ib])
-    print(means[ib,:, iScore])
-
+scoreNames = ["val", "sizes", "F1s", "valCond", "sizeCond", "f1Cond", "corrs", "wsc", "wsclabel"]
+for iScore in range(len(scoreNames)):
+    print(scoreNames[iScore])
+    for ib in range(len(bNames)):
+        print(bNames[ib], end=':')
+        print(means[ib,:, iScore], '(', stds[ib,:, iScore],')')
 
 
 
