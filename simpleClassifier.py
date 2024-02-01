@@ -13,57 +13,76 @@ class transformScores:
     def __init__(self, classifier, model, X, y, rho = 0):
         self.classifier = classifier
         self.n, self.K = self.classifier.predict_proba(X).shape
-        self.npars = 2 * (self.K + 1)
+        self.npars = self.K
         self.rho = rho
         self.model = model
-        if model[:2] == 'ER':
+        if self.model == 'ER':
             self.b = self.bER
-        if model[:3] == 'off':
+            self.theta = self.fitTransformation(X, y)
+        if self.model == 'off':
             self.b = self.bOff
-        if model == 'unweighted':
+            self.theta = self.fitTransformation(X, y)
+        if self.model == 'unweighted':
             self.b = self.bBase
             self.theta = numpy.zeros(self.npars) 
             print(self.model,  ': done')
             print('status, nit, theta: ', None, None, self.theta)
-        if model != 'unweighted': 
-            self.theta = self.fitTransformation(X, y)
 
-    def basicScore(self, p, eps = 1e-2):
+    def basicScore(self, p, eps = 0):
+        #p = rescale(p, eps)
         return 1 - p 
 
     def accumulator(self, f):
-        G = [[sum(numpy.sort(f[i])[::-1][:m]) 
-        #G = [[sum(numpy.sort(f[i])[:m]) 
-            for m in range(1, len(f[0])+1)] for i in range(len(f))]
+        if self.model == 'ER': 
+            K=len(f[0])
+            f = rescale(f, 0.00001)
+        else: 
+            K = len(f[0]) + 1
+            f = rescale(f, 0.01)
+        #G = [[sum(numpy.sort(f[i])[::-1][:m]) for m in range(1, K)] for i in range(len(f))]
+        G = [[sum(numpy.sort(f[i])[:m]) for m in range(1, K)] for i in range(len(f))]
         return numpy.array(G)
     
     def prepareData(self, p, x):
-        p = rescale(p, .001)
         A = self.basicScore(p)
         G = self.accumulator(p)
         return x, A, G
 
-    def bER(self, A, G, theta):
-        r = 1 + G@theta
+    def bER(self, A, G, theta, eps=.1):
+        r = eps + G @ theta
         return numpy.diag(numpy.exp(-(r**2))) @ A
     
     def bBase(self, A, G, theta):
         return A
     
     def bOff(self, A, G, theta):
-        r = numpy.expand_dims(G@theta, axis=-1)
+        r = numpy.expand_dims(G @ theta, axis=-1)
         return A - r
 
-    def fitTransformation(self, X, y):
+    def ML(self, theta, d1, eps=1e-4):
+        X1, A1, G1, y1 = d1
+        B1 = self.b(A1, G1, theta)
+        b1 = numpy.array([B1[i, y1[i]] for i in range(len(y1))])
+        q = sigma(b1) * sigma(1 - b1) + eps
+        return sum(-numpy.log(q)) + self.rho * theta @ theta
+   
+
+    def fitTransformation(self, X, y, eps=.1):
         x, A, G = self.prepareData(self.classifier.predict_proba(X), X)
-        g = G.T@G + self.rho * numpy.eye(len(G[0]))
+        g = G.T @ G + self.rho * numpy.eye(len(G[0]))
         if self.model == 'ER':
-            s = G.T @ numpy.ones(len(G))
+            s = eps * G.T @ numpy.ones(len(G))
+            #s = G.T @ numpy.ones(len(G))
             theta = - numpy.linalg.pinv(g) @ s
         if self.model=='off':
             a = numpy.array([A[i, y[i]] for i in range(len(y))])
-            s = G.T@ (a-1/2)
+            s = G.T @ (a - 1/2)
             theta = numpy.linalg.pinv(g) @ s
+            #d1 = [x, A, G, y]
+            #optimal = minimize(self.ML, theta,
+            #    args=(d1), options={'maxiter': 100}, tol = 1e-5)
+            #print(optimal.nit, ':', optimal.x, )
+            #theta = optimal.x
         print(self.model, theta)
         return theta
 
@@ -72,7 +91,7 @@ class transformScores:
         x, A, G = self.prepareData(p, x)
         return self.b(A, G, self.theta)
     
-    def evaluateCPclass(self, d1, d2, alpha = .1):
+    def evaluateCPclass(self, d1, d2, alpha):
         X, y = d1
         X, A, G= self.prepareData(self.classifier.predict_proba(X), X)
         B = self.b(A, G, self.theta)
@@ -84,7 +103,7 @@ class transformScores:
         sets = [[m for m in range(self.K) if B[i][m] < q] for i in range(len(y))]
         F1s, valCond, sizeCond, f1Cond= F1score(sets, y)
         corrs = HScorr(1 - A, sets)
-        sizes = numpy.sum([len(sets[i]) for i in range(len(sets))])/len(y)
+        sizes = numpy.sum([len(sets[i]) for i in range(len(sets))])#/len(y)
         val = numpy.sum([1 for i in range(len(y)) if y[i] in sets[i]])/len(y)
         print("wsc...")
         wsc = wsc_unbiased_label(X, y, sets, 0,
@@ -94,8 +113,10 @@ class transformScores:
         wsclabel = wsc_unbiased_label(X, y, sets, 1,
                 delta=0.1, M=1000, test_size=0.75, 
                 random_state=2020, verbose=False)
-        
         return val, sizes, F1s, valCond, sizeCond, f1Cond, corrs, wsc, wsclabel
+
+def sigma(x):
+    return 1/(1 + numpy.exp(-x))
 
 def classifier(D):
     X, Y = D
@@ -109,7 +130,7 @@ def quantile(v, alpha):
     return v[m]
 
 def rescale(V, beta):
-    S = numpy.exp(beta + V)
+    S = beta + numpy.exp(V)
     return  S/numpy.expand_dims(numpy.sum(S, axis=1), axis=1) 
 
 def H(v):
@@ -162,18 +183,18 @@ def splitData(X, y):
 
 
 #load and random-split the data
-numpy.random.seed(1234)
+numpy.random.seed(1234567)
 digits = load_digits()
 Xall = digits.images
 yall = digits.target
 Xall = Xall.reshape([len(Xall), 64])
 
 #run experiments
-bNames = ['unweighted', 'ER', 'off']
-rho = 0.0001
+bNames = ['unweighted', 'ER', 'off']#, 'unweighted']#['unweighted', 'ER', 'off']
+rho = [0, 0, 0.00001]
 results = []
 for k in range(10):
-    alpha = .05
+    alpha = .1
     choice = numpy.random.choice(len(Xall), size=len(Xall), replace=False)
     X, y = Xall[choice], yall[choice]
     train, cal, test = splitData(X, y)
@@ -186,18 +207,17 @@ for k in range(10):
     rfClass = classifier([dataset[0], dataset[1]])
     print(rfClass)
     X, y = train
-    Xt, yt = test
-    Xc, yc = cal
     bModels = []
     for ib in range(len(bNames)):
         bModels.append(
-                transformScores(rfClass, bNames[ib], X, y, rho))
+                transformScores(rfClass, bNames[ib], X, y, rho[ib]))
     
     r = [[] for i in bNames]
     for ib in range(len(bNames)): 
         model = bModels[ib]
-        score = model.evaluateCPclass(cal, test, alpha = .1)
+        score = model.evaluateCPclass(cal, test, alpha)
         val, sizes, F1s, valCond, sizeCond, f1Cond, corrs, wsc, wsclabel = score
+        #val, sizes, F1s, valCond, sizeCond, f1Cond, corrs = score
         print(bNames[ib])
         print(bModels[ib].theta)
         print("val, sizes, F1s, valCond, sizeCond, f1Cond, corrs, wsc, wsclabel", score)
@@ -205,7 +225,7 @@ for k in range(10):
 
     results.append(r)
 print(results)
-date='20240131'
+date='20240201'
 numpy.save('results'+date, results)
 results = numpy.load('results'+date+'.npy')
 nr = results
@@ -214,11 +234,12 @@ stds=numpy.std(nr, axis=0)
 
 
 scoreNames = ["val", "sizes", "F1s", "valCond", "sizeCond", "f1Cond", "corrs", "wsc", "wsclabel"]
+#scoreNames = ["val", "sizes", "F1s", "valCond", "sizeCond", "f1Cond", "corrs"]#, "wsc", "wsclabel"]
 for iScore in range(len(scoreNames)):
-    print(scoreNames[iScore])
+    print('&'+scoreNames[iScore]+'\\\\\\hline')
     for ib in range(len(bNames)):
-        print(bNames[ib], end=':')
-        print(means[ib,:, iScore][0], '(', stds[ib,:, iScore][0],')')
+        print(bNames[ib], end='&')
+        print(numpy.round(means[ib,:, iScore][0], 4), '$\pm$', numpy.round(stds[ib,:, iScore][0], 4))
 
 
 
